@@ -1,0 +1,40 @@
+labels:
+  app: docker-vault-init
+  app-group: k8s
+  container: docker-vault-init
+  language: docker
+  team: swat
+
+pipelines:
+  bake:
+    image: extensions/docker:stable
+    action: build
+    container: ${ESTAFETTE_LABEL_CONTAINER}
+    repositories:
+    - travix
+
+  push-to-docker-hub-branch:
+    image: extensions/docker:stable
+    action: push
+    container: ${ESTAFETTE_LABEL_CONTAINER}
+    repositories:
+    - travix
+    pushVersionTag: false
+    tags:
+    - ${ESTAFETTE_GIT_BRANCH}
+    when:
+      status == 'succeeded' &&
+      branch != 'master'
+
+  push-to-docker-hub-latest:
+    image: extensions/docker:stable
+    action: push
+    container: ${ESTAFETTE_LABEL_CONTAINER}
+    repositories:
+    - travix
+    pushVersionTag: false
+    tags:
+    - latest
+    when:
+      status == 'succeeded' &&
+      branch == 'master'
