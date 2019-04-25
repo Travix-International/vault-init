@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strconv"
 	"syscall"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"golang.org/x/oauth2/google"
@@ -38,7 +39,7 @@ var (
 	vaultRecoveryThreshold int
 
 	kmsService *cloudkms.Service
-	kmsKeyID   string
+	kmsKeyId   string
 
 	storageClient *storage.Client
 
@@ -86,17 +87,23 @@ func main() {
 	vaultSecretShares = intFromEnv("VAULT_SECRET_SHARES", 5)
 	vaultSecretThreshold = intFromEnv("VAULT_SECRET_THRESHOLD", 3)
 
-	vaultStoredShares = intFromEnv("VAULT_STORED_SHARES", 1)
-	vaultRecoveryShares = intFromEnv("VAULT_RECOVERY_SHARES", 1)
-	vaultRecoveryThreshold = intFromEnv("VAULT_RECOVERY_THRESHOLD", 1)
+	vaultAutoUnseal := boolFromEnv("VAULT_AUTO_UNSEAL", true)
+
+	if vaultAutoUnseal {
+		vaultStoredShares = intFromEnv("VAULT_STORED_SHARES", 1)
+		vaultRecoveryShares = intFromEnv("VAULT_RECOVERY_SHARES", 1)
+		vaultRecoveryThreshold = intFromEnv("VAULT_RECOVERY_THRESHOLD", 1)
+	}
+
+	checkInterval := durFromEnv("CHECK_INTERVAL", 10*time.Second)
 
 	gcsBucketName = os.Getenv("GCS_BUCKET_NAME")
 	if gcsBucketName == "" {
 		log.Fatal("GCS_BUCKET_NAME must be set and not empty")
 	}
 
-	kmsKeyID = os.Getenv("KMS_KEY_ID")
-	if kmsKeyID == "" {
+	kmsKeyId = os.Getenv("KMS_KEY_ID")
+	if kmsKeyId == "" {
 		log.Fatal("KMS_KEY_ID must be set and not empty")
 	}
 
@@ -147,39 +154,54 @@ func main() {
 		os.Exit(0)
 	}
 
-	select {
-	case <-signalCh:
-		stop()
-	default:
-	}
-	response, err := httpClient.Head(vaultAddr + "/v1/sys/health")
+	for {
+		select {
+		case <-signalCh:
+			stop()
+		default:
+		}
+		response, err := httpClient.Head(vaultAddr + "/v1/sys/health")
 
-	if response != nil && response.Body != nil {
-		response.Body.Close()
-	}
+		if response != nil && response.Body != nil {
+			response.Body.Close()
+		}
 
-	if err != nil {
-		log.Println(err)
-	}
+		if err != nil {
+			log.Println(err)
+			time.Sleep(checkInterval)
+			continue
+		}
 
-	switch response.StatusCode {
-	case 200:
-		log.Println("Vault is initialized and unsealed.")
-	case 429:
-		log.Println("Vault is unsealed and in standby mode.")
-	case 501:
-		log.Println("Vault is not initialized.")
-		log.Println("Initializing...")
-		initialize()
-	case 503:
-		log.Println("Vault is sealed.")
-	default:
-		log.Printf("Vault is in an unknown state. Status code: %d", response.StatusCode)
-	}
+		switch response.StatusCode {
+		case 200:
+			log.Println("Vault is initialized and unsealed.")
+		case 429:
+			log.Println("Vault is unsealed and in standby mode.")
+		case 501:
+			log.Println("Vault is not initialized.")
+			log.Println("Initializing...")
+			initialize()
+			if !vaultAutoUnseal {
+				log.Println("Unsealing...")
+				unseal()
+			}
+		case 503:
+			log.Println("Vault is sealed.")
+			if !vaultAutoUnseal {
+				log.Println("Unsealing...")
+				unseal()
+			}
+		default:
+			log.Printf("Vault is in an unknown state. Status code: %d", response.StatusCode)
+		}
 
-	select {
-	case <-signalCh:
-		stop()
+		log.Printf("Next check in %s", checkInterval)
+
+		select {
+		case <-signalCh:
+			stop()
+		case <-time.After(checkInterval):
+		}
 	}
 }
 
@@ -236,7 +258,7 @@ func initialize() {
 		Plaintext: base64.StdEncoding.EncodeToString([]byte(initResponse.RootToken)),
 	}
 
-	rootTokenEncryptResponse, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.Encrypt(kmsKeyID, rootTokenEncryptRequest).Do()
+	rootTokenEncryptResponse, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.Encrypt(kmsKeyId, rootTokenEncryptRequest).Do()
 	if err != nil {
 		log.Println(err)
 		return
@@ -246,7 +268,7 @@ func initialize() {
 		Plaintext: base64.StdEncoding.EncodeToString(initRequestResponseBody),
 	}
 
-	unsealKeysEncryptResponse, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.Encrypt(kmsKeyID, unsealKeysEncryptRequest).Do()
+	unsealKeysEncryptResponse, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.Encrypt(kmsKeyId, unsealKeysEncryptRequest).Do()
 	if err != nil {
 		log.Println(err)
 		return
@@ -280,6 +302,115 @@ func initialize() {
 	log.Println("Initialization complete.")
 }
 
+func unseal() {
+	bucket := storageClient.Bucket(gcsBucketName)
+
+	ctx := context.Background()
+	unsealKeysObject, err := bucket.Object("unseal-keys.json.enc").NewReader(ctx)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	defer unsealKeysObject.Close()
+
+	unsealKeysData, err := ioutil.ReadAll(unsealKeysObject)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	unsealKeysDecryptRequest := &cloudkms.DecryptRequest{
+		Ciphertext: string(unsealKeysData),
+	}
+
+	unsealKeysDecryptResponse, err := kmsService.Projects.Locations.KeyRings.CryptoKeys.Decrypt(kmsKeyId, unsealKeysDecryptRequest).Do()
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	var initResponse InitResponse
+
+	unsealKeysPlaintext, err := base64.StdEncoding.DecodeString(unsealKeysDecryptResponse.Plaintext)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	if err := json.Unmarshal(unsealKeysPlaintext, &initResponse); err != nil {
+		log.Println(err)
+		return
+	}
+
+	for _, key := range initResponse.KeysBase64 {
+		done, err := unsealOne(key)
+		if done {
+			return
+		}
+
+		if err != nil {
+			log.Println(err)
+			return
+		}
+	}
+}
+
+func unsealOne(key string) (bool, error) {
+	unsealRequest := UnsealRequest{
+		Key: key,
+	}
+
+	unsealRequestData, err := json.Marshal(&unsealRequest)
+	if err != nil {
+		return false, err
+	}
+
+	r := bytes.NewReader(unsealRequestData)
+	request, err := http.NewRequest(http.MethodPut, vaultAddr+"/v1/sys/unseal", r)
+	if err != nil {
+		return false, err
+	}
+
+	response, err := httpClient.Do(request)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != 200 {
+		return false, fmt.Errorf("unseal: non-200 status code: %d", response.StatusCode)
+	}
+
+	unsealRequestResponseBody, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		return false, err
+	}
+
+	var unsealResponse UnsealResponse
+	if err := json.Unmarshal(unsealRequestResponseBody, &unsealResponse); err != nil {
+		return false, err
+	}
+
+	if !unsealResponse.Sealed {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func boolFromEnv(env string, def bool) bool {
+	val := os.Getenv(env)
+	if val == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(val)
+	if err != nil {
+		log.Fatalf("failed to parse %q: %s", env, err)
+	}
+	return b
+}
+
 func intFromEnv(env string, def int) int {
 	val := os.Getenv(env)
 	if val == "" {
@@ -290,4 +421,20 @@ func intFromEnv(env string, def int) int {
 		log.Fatalf("failed to parse %q: %s", env, err)
 	}
 	return i
+}
+
+func durFromEnv(env string, def time.Duration) time.Duration {
+	val := os.Getenv(env)
+	if val == "" {
+		return def
+	}
+	r := val[len(val)-1]
+	if r >= '0' || r <= '9' {
+		val = val + "s" // assume seconds
+	}
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		log.Fatalf("failed to parse %q: %s", env, err)
+	}
+	return d
 }
