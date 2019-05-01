@@ -34,7 +34,7 @@ pipelines:
     - travix
     pushVersionTag: false
     tags:
-    - latest
+    - 1.1.0
     when:
       status == 'succeeded' &&
       branch == 'master'
