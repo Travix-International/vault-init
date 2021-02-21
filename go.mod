@@ -1,14 +1,14 @@
 module github.com/sethvargo/vault-init
 
+go 1.13
+
 require (
-	cloud.google.com/go v0.34.0
-	github.com/google/martian v2.1.0+incompatible // indirect
-	github.com/googleapis/gax-go v2.0.2+incompatible // indirect
-	go.opencensus.io v0.18.0 // indirect
-	golang.org/x/net v0.0.0-20181201002055-351d144fa1fc // indirect
-	golang.org/x/oauth2 v0.0.0-20181203162652-d668ce993890
-	google.golang.org/api v0.0.0-20181206193914-fa497fbf1768
-	google.golang.org/appengine v1.3.0 // indirect
-	google.golang.org/genproto v0.0.0-20181202183823-bd91e49a0898 // indirect
-	google.golang.org/grpc v1.17.0 // indirect
+	cloud.google.com/go v0.57.0 // indirect
+	cloud.google.com/go/storage v1.7.0
+	github.com/golang/protobuf v1.4.1 // indirect
+	golang.org/x/net v0.0.0-20200506145744-7e3656a0809f // indirect
+	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d
+	golang.org/x/sys v0.0.0-20200501145240-bc7a7d42d5c3 // indirect
+	golang.org/x/tools v0.0.0-20200505023115-26f46d2f7ef8 // indirect
+	google.golang.org/api v0.23.0
 )

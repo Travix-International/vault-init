@@ -87,6 +87,8 @@ func main() {
 	vaultSecretShares = intFromEnv("VAULT_SECRET_SHARES", 5)
 	vaultSecretThreshold = intFromEnv("VAULT_SECRET_THRESHOLD", 3)
 
+	vaultInsecureSkipVerify := boolFromEnv("VAULT_SKIP_VERIFY", false)
+
 	vaultAutoUnseal := boolFromEnv("VAULT_AUTO_UNSEAL", true)
 
 	if vaultAutoUnseal {
@@ -135,7 +137,7 @@ func main() {
 	httpClient = http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
+				InsecureSkipVerify: vaultInsecureSkipVerify,
 			},
 		},
 	}
@@ -193,6 +195,11 @@ func main() {
 			}
 		default:
 			log.Printf("Vault is in an unknown state. Status code: %d", response.StatusCode)
+		}
+
+		if checkInterval <= 0 {
+			log.Printf("Check interval set to less than 0, exiting.")
+			stop()
 		}
 
 		log.Printf("Next check in %s", checkInterval)
